@@ -16909,6 +16909,9 @@ function runPromptfoo(promptFile, env, promptFileId, additionalParameters) {
             };
         }
         const outputFile = path.join(process.cwd(), `promptfoo-output-${promptFileId}.json`);
+        // Emit an HTML report alongside the JSON output (-o is variadic). The JSON is
+        // still used below for the PR comment summary; the HTML is for humans to skim.
+        const htmlFile = path.join(process.cwd(), `promptfoo-output-${promptFileId}.html`);
         const promptfooArgs = [
             'eval',
             '-c',
@@ -16917,6 +16920,7 @@ function runPromptfoo(promptFile, env, promptFileId, additionalParameters) {
             promptFile,
             '-o',
             outputFile,
+            htmlFile,
             ...(additionalParameters || []),
         ];
         core.info(`[action] Running promptfoo with args: ${JSON.stringify(promptfooArgs)}`);
