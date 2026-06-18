@@ -81,6 +81,12 @@ export async function runPromptfoo(
     process.cwd(),
     `promptfoo-output-${promptFileId}.json`,
   );
+  // Emit an HTML report alongside the JSON output (-o is variadic). The JSON is
+  // still used below for the PR comment summary; the HTML is for humans to skim.
+  const htmlFile = path.join(
+    process.cwd(),
+    `promptfoo-output-${promptFileId}.html`,
+  );
   const promptfooArgs = [
     'eval',
     '-c',
@@ -89,6 +95,7 @@ export async function runPromptfoo(
     promptFile,
     '-o',
     outputFile,
+    htmlFile,
     ...(additionalParameters || []),
   ];
   core.info(
