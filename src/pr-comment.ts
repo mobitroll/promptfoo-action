@@ -2,7 +2,13 @@ import * as core from '@actions/core';
 import * as github from '@actions/github';
 import * as glob from 'glob';
 import {simpleGit} from 'simple-git';
-import {runPromptfoo} from './shared';
+import {
+  runPromptfoo,
+  runConfig,
+  configDependencies,
+  findConfigFileFromPromptFile,
+  normalizePath,
+} from './shared';
 
 const gitInterface = simpleGit();
 
@@ -30,41 +36,73 @@ export async function run(): Promise<void> {
     }
 
     core.info(`git diff --name-only origin/main`);
-    const changedFiles = await gitInterface.diff([
+    const changedFilesRaw = await gitInterface.diff([
       '--name-only',
       'origin/main',
     ]);
     core.info('Changed files:');
-    core.info(JSON.stringify(changedFiles));
+    core.info(JSON.stringify(changedFilesRaw));
+    const changedSet = new Set(
+      changedFilesRaw.split('\n').map(normalizePath).filter(Boolean),
+    );
 
-    // Resolve glob patterns to file paths
+    // Resolve glob patterns to the prompt-output files that changed.
     const promptFiles: string[] = [];
     for (const globPattern of promptFilesGlobs) {
-      const matches = glob.sync(globPattern);
-      const changedMatches = matches.filter(file =>
-        changedFiles.includes(file),
-      );
+      const matches = glob.sync(globPattern.trim());
+      const changedMatches = matches
+        .map(normalizePath)
+        .filter(file => changedSet.has(file));
       promptFiles.push(...changedMatches);
     }
+    const promptFileSet = new Set(promptFiles);
 
-    // Run promptfoo evaluation only for changed files
+    // Configs whose NON-prompt dependencies changed (test vars, providers,
+    // assertion scripts, rubrics, or the config file itself) must be re-run as
+    // a whole — editing a test no longer changes a prompt JSON, so the
+    // prompt-only detection above would miss them.
+    const wholeConfigs: string[] = [];
+    for (const cfg of glob.sync('*.yaml')) {
+      const hits = [...configDependencies(cfg)].filter(d => changedSet.has(d));
+      const hasNonPromptHit = hits.some(h => !promptFileSet.has(h));
+      if (hits.length > 0 && hasNonPromptHit) {
+        wholeConfigs.push(normalizePath(cfg));
+      }
+    }
+    const wholeConfigSet = new Set(wholeConfigs);
+
     core.info(`Changed prompt files: ${promptFiles.join(', ')}`);
-    if (promptFiles.length === 0) {
+    core.info(`Affected configs (whole run): ${wholeConfigs.join(', ')}`);
+    if (promptFiles.length === 0 && wholeConfigs.length === 0) {
       return;
     }
-    // For each prompt file, find the .yaml file that references it
-    // and run promptfoo with that .yaml file as config
-    let body = '';
+
     const env = {
       ...process.env,
       ...(azureOpenaiApiKey ? {AZURE_OPENAI_API_KEY: azureOpenaiApiKey} : {}),
       ...(openaiApiKey ? {OPENAI_API_KEY: openaiApiKey} : {}),
       ...(cachePath ? {PROMPTFOO_CACHE_PATH: cachePath} : {}),
     };
-    let promptFileId = 1;
+
+    let body = '';
+    let id = 1;
+
+    // Whole-config runs (a test/provider/assertion dependency changed).
+    for (const configFile of wholeConfigs) {
+      core.info(`Running promptfoo for config ${configFile}`);
+      const {summary} = await runConfig(configFile, undefined, env, id++);
+      body += summary;
+    }
+
+    // Per-prompt runs (a prompt JSON changed), skipping any whose config is
+    // already covered by a whole-config run above.
     for (const promptFile of promptFiles) {
+      const cfg = findConfigFileFromPromptFile(promptFile);
+      if (cfg && wholeConfigSet.has(normalizePath(cfg))) {
+        continue;
+      }
       core.info(`Running promptfoo for ${promptFile}`);
-      const {summary} = await runPromptfoo(promptFile, env, promptFileId++);
+      const {summary} = await runPromptfoo(promptFile, env, id++);
       body += summary;
     }
 

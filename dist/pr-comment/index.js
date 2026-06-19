@@ -16757,32 +16757,59 @@ function run() {
                 throw new Error('No pull request found.');
             }
             core.info(`git diff --name-only origin/main`);
-            const changedFiles = yield gitInterface.diff([
+            const changedFilesRaw = yield gitInterface.diff([
                 '--name-only',
                 'origin/main',
             ]);
             core.info('Changed files:');
-            core.info(JSON.stringify(changedFiles));
-            // Resolve glob patterns to file paths
+            core.info(JSON.stringify(changedFilesRaw));
+            const changedSet = new Set(changedFilesRaw.split('\n').map(shared_1.normalizePath).filter(Boolean));
+            // Resolve glob patterns to the prompt-output files that changed.
             const promptFiles = [];
             for (const globPattern of promptFilesGlobs) {
-                const matches = glob.sync(globPattern);
-                const changedMatches = matches.filter(file => changedFiles.includes(file));
+                const matches = glob.sync(globPattern.trim());
+                const changedMatches = matches
+                    .map(shared_1.normalizePath)
+                    .filter(file => changedSet.has(file));
                 promptFiles.push(...changedMatches);
             }
-            // Run promptfoo evaluation only for changed files
+            const promptFileSet = new Set(promptFiles);
+            // Configs whose NON-prompt dependencies changed (test vars, providers,
+            // assertion scripts, rubrics, or the config file itself) must be re-run as
+            // a whole — editing a test no longer changes a prompt JSON, so the
+            // prompt-only detection above would miss them.
+            const wholeConfigs = [];
+            for (const cfg of glob.sync('*.yaml')) {
+                const hits = [...(0, shared_1.configDependencies)(cfg)].filter(d => changedSet.has(d));
+                const hasNonPromptHit = hits.some(h => !promptFileSet.has(h));
+                if (hits.length > 0 && hasNonPromptHit) {
+                    wholeConfigs.push((0, shared_1.normalizePath)(cfg));
+                }
+            }
+            const wholeConfigSet = new Set(wholeConfigs);
             core.info(`Changed prompt files: ${promptFiles.join(', ')}`);
-            if (promptFiles.length === 0) {
+            core.info(`Affected configs (whole run): ${wholeConfigs.join(', ')}`);
+            if (promptFiles.length === 0 && wholeConfigs.length === 0) {
                 return;
             }
-            // For each prompt file, find the .yaml file that references it
-            // and run promptfoo with that .yaml file as config
-            let body = '';
             const env = Object.assign(Object.assign(Object.assign(Object.assign({}, process.env), (azureOpenaiApiKey ? { AZURE_OPENAI_API_KEY: azureOpenaiApiKey } : {})), (openaiApiKey ? { OPENAI_API_KEY: openaiApiKey } : {})), (cachePath ? { PROMPTFOO_CACHE_PATH: cachePath } : {}));
-            let promptFileId = 1;
+            let body = '';
+            let id = 1;
+            // Whole-config runs (a test/provider/assertion dependency changed).
+            for (const configFile of wholeConfigs) {
+                core.info(`Running promptfoo for config ${configFile}`);
+                const { summary } = yield (0, shared_1.runConfig)(configFile, undefined, env, id++);
+                body += summary;
+            }
+            // Per-prompt runs (a prompt JSON changed), skipping any whose config is
+            // already covered by a whole-config run above.
             for (const promptFile of promptFiles) {
+                const cfg = (0, shared_1.findConfigFileFromPromptFile)(promptFile);
+                if (cfg && wholeConfigSet.has((0, shared_1.normalizePath)(cfg))) {
+                    continue;
+                }
                 core.info(`Running promptfoo for ${promptFile}`);
-                const { summary } = yield (0, shared_1.runPromptfoo)(promptFile, env, promptFileId++);
+                const { summary } = yield (0, shared_1.runPromptfoo)(promptFile, env, id++);
                 body += summary;
             }
             // Comment PR
@@ -16849,7 +16876,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.runPromptfoo = exports.findPromptFile = exports.displayResultSummary = void 0;
+exports.runConfig = exports.runPromptfoo = exports.configDependencies = exports.findConfigFileFromPromptFile = exports.normalizePath = exports.findPromptFile = exports.displayResultSummary = void 0;
 const exec = __importStar(__nccwpck_require__(1514));
 const path = __importStar(__nccwpck_require__(1017));
 const fs = __importStar(__nccwpck_require__(7147));
@@ -16865,7 +16892,7 @@ function displayResultSummary(output) {
 \`\`\`
 ${result.error}
 \`\`\`
-    
+
 **VARS:**
 \`\`\`
 ${JSON.stringify(result.vars)}
@@ -16888,8 +16915,12 @@ function findPromptFile(promptFile) {
     throw new Error(`Prompt file not found: ${promptFile}`);
 }
 exports.findPromptFile = findPromptFile;
+function normalizePath(p) {
+    return p.replace(/^\.\//, '').trim();
+}
+exports.normalizePath = normalizePath;
 function findConfigFileFromPromptFile(promptFile) {
-    // Look for all yarm files and look for promptFile in them
+    // Look for all yaml files and look for promptFile in them
     const yamlFiles = glob.sync('*.yaml');
     for (const yamlFile of yamlFiles) {
         const yamlContent = fs.readFileSync(yamlFile, 'utf8');
@@ -16899,6 +16930,30 @@ function findConfigFileFromPromptFile(promptFile) {
     }
     return undefined;
 }
+exports.findConfigFileFromPromptFile = findConfigFileFromPromptFile;
+// Collect every file a config depends on: referenced prompt outputs, test vars
+// (globs expanded), providers, assertion scripts and rubrics, plus the config
+// file itself. Used to decide whether a changed file should (re)trigger that
+// config's evaluation — not just changes to the generated prompt JSON.
+function configDependencies(configFile) {
+    const text = fs.readFileSync(configFile, 'utf8');
+    const deps = new Set([normalizePath(configFile)]);
+    // Matches `file://tests/...`, `./tests/...`, `prompts-output/...`, `prompts/...`
+    const tokenRe = /(?:file:\/\/)?((?:\.\/)?(?:tests|prompts-output|prompts)\/[^\s"',)]+)/g;
+    let m;
+    while ((m = tokenRe.exec(text)) !== null) {
+        const token = normalizePath(m[1]);
+        if (/[*?[\]{}]/.test(token)) {
+            for (const f of glob.sync(token))
+                deps.add(normalizePath(f));
+        }
+        else {
+            deps.add(token);
+        }
+    }
+    return deps;
+}
+exports.configDependencies = configDependencies;
 function runPromptfoo(promptFile, env, promptFileId, additionalParameters) {
     return __awaiter(this, void 0, void 0, function* () {
         const configFile = findConfigFileFromPromptFile(promptFile);
@@ -16908,6 +16963,15 @@ function runPromptfoo(promptFile, env, promptFileId, additionalParameters) {
                 summary: `⚠️ No config file found for ${promptFile}\n\n`,
             };
         }
+        return runConfig(configFile, promptFile, env, promptFileId, additionalParameters);
+    });
+}
+exports.runPromptfoo = runPromptfoo;
+// Run a single promptfoo config. When `promptFile` is given, the run is scoped
+// to that prompt (`--prompts`); otherwise the whole config is evaluated (used
+// when a test/provider/assertion dependency changed rather than the prompt).
+function runConfig(configFile, promptFile, env, promptFileId, additionalParameters) {
+    return __awaiter(this, void 0, void 0, function* () {
         const outputFile = path.join(process.cwd(), `promptfoo-output-${promptFileId}.json`);
         // Emit an HTML report alongside the JSON output (-o is variadic). The JSON is
         // still used below for the PR comment summary; the HTML is for humans to skim.
@@ -16916,8 +16980,7 @@ function runPromptfoo(promptFile, env, promptFileId, additionalParameters) {
             'eval',
             '-c',
             configFile,
-            '--prompts',
-            promptFile,
+            ...(promptFile ? ['--prompts', promptFile] : []),
             '-o',
             outputFile,
             htmlFile,
@@ -16932,7 +16995,8 @@ function runPromptfoo(promptFile, env, promptFileId, additionalParameters) {
             core.error(`[action] Error running promptfoo: ${error}`);
         }
         const output = JSON.parse(fs.readFileSync(outputFile, 'utf8'));
-        const summary = `# ${promptFile}
+        const heading = promptFile !== null && promptFile !== void 0 ? promptFile : configFile;
+        const summary = `# ${heading}
 
 | Success | Failure |
 |---------|---------|
@@ -16944,7 +17008,7 @@ ${displayResultSummary(output)}
         return { outputFile, summary };
     });
 }
-exports.runPromptfoo = runPromptfoo;
+exports.runConfig = runConfig;
 
 
 /***/ }),
