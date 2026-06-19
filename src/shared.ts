@@ -76,18 +76,34 @@ export function findConfigFileFromPromptFile(
 export function configDependencies(configFile: string): Set<string> {
   const text = fs.readFileSync(configFile, 'utf8');
   const deps = new Set<string>([normalizePath(configFile)]);
-  // Matches `file://tests/...`, `./tests/...`, `prompts-output/...`, `prompts/...`
-  const tokenRe =
-    /(?:file:\/\/)?((?:\.\/)?(?:tests|prompts-output|prompts)\/[^\s"',)]+)/g;
-  let m: RegExpExecArray | null;
-  while ((m = tokenRe.exec(text)) !== null) {
-    const token = normalizePath(m[1]);
+
+  const addToken = (raw: string): void => {
+    const token = normalizePath(raw);
+    if (!token) return;
     if (/[*?[\]{}]/.test(token)) {
       for (const f of glob.sync(token)) deps.add(normalizePath(f));
     } else {
       deps.add(token);
     }
-  }
+  };
+
+  // promptfoo references external files either with a `file://` scheme or as a
+  // `./`-relative path. We match both and stay agnostic to the repo's directory
+  // layout (prompts/tests/providers can live anywhere). Over-matching is
+  // harmless: a captured token is only ever intersected with the changed-file
+  // set, so non-paths simply never match.
+  //
+  // 1. Any `file://` reference — prompt outputs, test vars, providers,
+  //    assertion scripts, rubrics — wherever they live.
+  const fileUrlRe = /file:\/\/([^\s"',)}\]]+)/g;
+  // 2. `./`-relative references written without a `file://` scheme
+  //    (e.g. `tests: ./tests/...`).
+  const relPathRe = /(?:^|[\s:])(\.\/[^\s"',)}\]]+)/gm;
+
+  let m: RegExpExecArray | null;
+  while ((m = fileUrlRe.exec(text)) !== null) addToken(m[1]);
+  while ((m = relPathRe.exec(text)) !== null) addToken(m[1]);
+
   return deps;
 }
 

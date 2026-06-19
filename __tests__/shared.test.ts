@@ -36,6 +36,19 @@ describe('configDependencies', () => {
         'defaultTest:',
         '  options:',
         '    provider: file://tests/providers/gemini.yaml',
+        '  assert:',
+        // A file:// reference that lives OUTSIDE tests/prompts/prompts-output.
+        '    - type: javascript',
+        '      value: file://scripts/check.js',
+      ].join('\n'),
+    );
+    fs.writeFileSync(
+      path.join(dir, 'bare-tests.yaml'),
+      [
+        'prompts:',
+        '  - file://prompts-output/ai/chat.json',
+        // Bare `./`-prefixed tests reference without a file:// scheme.
+        'tests: ./tests/vars/copilot/a.yaml',
       ].join('\n'),
     );
     process.chdir(dir);
@@ -55,5 +68,16 @@ describe('configDependencies', () => {
     expect(deps.has('tests/vars/copilot/b.yaml')).toBe(true);
     // Provider path referenced even though the file does not exist on disk.
     expect(deps.has('tests/providers/gemini.yaml')).toBe(true);
+  });
+
+  test('catches file:// references outside the content directories', () => {
+    const deps = configDependencies('copilot.yaml');
+    // Regression: assertion script outside tests/prompts/prompts-output.
+    expect(deps.has('scripts/check.js')).toBe(true);
+  });
+
+  test('catches bare ./-prefixed tests references without a file:// scheme', () => {
+    const deps = configDependencies('bare-tests.yaml');
+    expect(deps.has('tests/vars/copilot/a.yaml')).toBe(true);
   });
 });
