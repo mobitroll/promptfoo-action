@@ -28,7 +28,7 @@ export function displayResultSummary(output: IPromptFooOutput): string {
 \`\`\`
 ${result.error}
 \`\`\`
-    
+
 **VARS:**
 \`\`\`
 ${JSON.stringify(result.vars)}
@@ -51,8 +51,14 @@ export function findPromptFile(promptFile: string): string {
   throw new Error(`Prompt file not found: ${promptFile}`);
 }
 
-function findConfigFileFromPromptFile(promptFile: string): string | undefined {
-  // Look for all yarm files and look for promptFile in them
+export function normalizePath(p: string): string {
+  return p.replace(/^\.\//, '').trim();
+}
+
+export function findConfigFileFromPromptFile(
+  promptFile: string,
+): string | undefined {
+  // Look for all yaml files and look for promptFile in them
   const yamlFiles = glob.sync('*.yaml');
   for (const yamlFile of yamlFiles) {
     const yamlContent = fs.readFileSync(yamlFile, 'utf8');
@@ -61,6 +67,44 @@ function findConfigFileFromPromptFile(promptFile: string): string | undefined {
     }
   }
   return undefined;
+}
+
+// Collect every file a config depends on: referenced prompt outputs, test vars
+// (globs expanded), providers, assertion scripts and rubrics, plus the config
+// file itself. Used to decide whether a changed file should (re)trigger that
+// config's evaluation — not just changes to the generated prompt JSON.
+export function configDependencies(configFile: string): Set<string> {
+  const text = fs.readFileSync(configFile, 'utf8');
+  const deps = new Set<string>([normalizePath(configFile)]);
+
+  const addToken = (raw: string): void => {
+    const token = normalizePath(raw);
+    if (!token) return;
+    if (/[*?[\]{}]/.test(token)) {
+      for (const f of glob.sync(token)) deps.add(normalizePath(f));
+    } else {
+      deps.add(token);
+    }
+  };
+
+  // promptfoo references external files either with a `file://` scheme or as a
+  // `./`-relative path. We match both and stay agnostic to the repo's directory
+  // layout (prompts/tests/providers can live anywhere). Over-matching is
+  // harmless: a captured token is only ever intersected with the changed-file
+  // set, so non-paths simply never match.
+  //
+  // 1. Any `file://` reference — prompt outputs, test vars, providers,
+  //    assertion scripts, rubrics — wherever they live.
+  const fileUrlRe = /file:\/\/([^\s"',)}\]]+)/g;
+  // 2. `./`-relative references written without a `file://` scheme
+  //    (e.g. `tests: ./tests/...`).
+  const relPathRe = /(?:^|[\s:])(\.\/[^\s"',)}\]]+)/gm;
+
+  let m: RegExpExecArray | null;
+  while ((m = fileUrlRe.exec(text)) !== null) addToken(m[1]);
+  while ((m = relPathRe.exec(text)) !== null) addToken(m[1]);
+
+  return deps;
 }
 
 export async function runPromptfoo(
@@ -76,7 +120,25 @@ export async function runPromptfoo(
       summary: `⚠️ No config file found for ${promptFile}\n\n`,
     };
   }
+  return runConfig(
+    configFile,
+    promptFile,
+    env,
+    promptFileId,
+    additionalParameters,
+  );
+}
 
+// Run a single promptfoo config. When `promptFile` is given, the run is scoped
+// to that prompt (`--prompts`); otherwise the whole config is evaluated (used
+// when a test/provider/assertion dependency changed rather than the prompt).
+export async function runConfig(
+  configFile: string,
+  promptFile: string | undefined,
+  env: {[key: string]: string},
+  promptFileId: number,
+  additionalParameters?: string[],
+): Promise<{outputFile: string; summary: string}> {
   const outputFile = path.join(
     process.cwd(),
     `promptfoo-output-${promptFileId}.json`,
@@ -91,8 +153,7 @@ export async function runPromptfoo(
     'eval',
     '-c',
     configFile,
-    '--prompts',
-    promptFile,
+    ...(promptFile ? ['--prompts', promptFile] : []),
     '-o',
     outputFile,
     htmlFile,
@@ -112,7 +173,8 @@ export async function runPromptfoo(
   const output: IPromptFooOutput = JSON.parse(
     fs.readFileSync(outputFile, 'utf8'),
   );
-  const summary = `# ${promptFile}
+  const heading = promptFile ?? configFile;
+  const summary = `# ${heading}
 
 | Success | Failure |
 |---------|---------|
