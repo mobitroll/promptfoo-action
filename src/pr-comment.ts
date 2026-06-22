@@ -62,11 +62,11 @@ export async function run(): Promise<void> {
     // a whole — editing a test no longer changes a prompt JSON, so the
     // prompt-only detection above would miss them.
     const wholeConfigs: string[] = [];
-    for (const cfg of glob.sync('*.yaml')) {
-      const hits = [...configDependencies(cfg)].filter(d => changedSet.has(d));
+    for (const configFile of glob.sync('*.yaml')) {
+      const hits = [...configDependencies(configFile)].filter(d => changedSet.has(d));
       const hasNonPromptHit = hits.some(h => !promptFileSet.has(h));
       if (hits.length > 0 && hasNonPromptHit) {
-        wholeConfigs.push(normalizePath(cfg));
+        wholeConfigs.push(normalizePath(configFile));
       }
     }
     const wholeConfigSet = new Set(wholeConfigs);
@@ -97,8 +97,8 @@ export async function run(): Promise<void> {
     // Per-prompt runs (a prompt JSON changed), skipping any whose config is
     // already covered by a whole-config run above.
     for (const promptFile of promptFiles) {
-      const cfg = findConfigFileFromPromptFile(promptFile);
-      if (cfg && wholeConfigSet.has(normalizePath(cfg))) {
+      const configFile = findConfigFileFromPromptFile(promptFile);
+      if (configFile && wholeConfigSet.has(normalizePath(configFile))) {
         continue;
       }
       core.info(`Running promptfoo for ${promptFile}`);
